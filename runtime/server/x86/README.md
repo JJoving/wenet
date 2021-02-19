@@ -28,8 +28,10 @@ model_dir=your_model_dir
     --chunk_size -1 \
     --wav_path $wav_path \
     --model_path $model_dir/final.zip \
-    --dict_path $model_dir/words.txt
+    --dict_path $model_dir/words.txt 2>&1 | tee log.txt
 ```
+
+After decoding, the average RTF of the waves will display on the console.
 
 ## Run Websocket streaming ASR demo
 
@@ -45,7 +47,7 @@ model_dir=your_model_dir
     --port 10086 \
     --chunk_size 16 \
     --model_path $model_dir/final.zip \
-    --dict_path $model_dir/words.txt
+    --dict_path $model_dir/words.txt 2>&1 | tee server.log
 ```
 
 Then, run the client by:
@@ -53,11 +55,19 @@ Then, run the client by:
 ```sh
 export GLOG_logtostderr=1
 export GLOG_v=2
+wav_path=your_test_wav_path
 ./build/websocket_client_main \
     --host 127.0.0.1 --port 10086 \
-    --wav_path your_test_wav_path
+    --wav_path $wav_path 2>&1 | tee client.log
 ```
 
+Once finished decoding, compute the average rescoring cost latency by:
+
+``` sh
+grep "Rescoring cost latency" server.log | awk '{sum += $NF}; END {print sum/NR}'
+```
+
+Moreover, the total latency of decoding `your_test_wav_path` will display on the console.
 
 Here is a gif demo using our pretrained AIShell unified E2E model, which shows how our
 model, websocket server and websocket client enable streaming ASR.

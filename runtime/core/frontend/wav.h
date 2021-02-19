@@ -47,7 +47,7 @@ struct WavHeader {
 class WavReader {
  public:
   explicit WavReader(const std::string& filename) {
-    FILE* fp = fopen(filename.c_str(), "r");
+    FILE* fp = fopen(filename.c_str(), "rb");
     if (NULL == fp) {
       LOG(FATAL) << "Error in read " << filename;
     }
@@ -107,7 +107,7 @@ class WavReader {
   int num_sample() const { return num_sample_; }
 
   ~WavReader() {
-    if (data_ != NULL) delete data_;
+    if (data_ != NULL) delete[] data_;
   }
 
   const float* data() const { return data_; }

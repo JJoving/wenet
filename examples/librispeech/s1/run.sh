@@ -29,6 +29,7 @@ average_checkpoint=true
 decode_checkpoint=$dir/final.pt
 # maybe you can try to adjust it if you can not get close results as README.md
 average_num=20
+decode_modes="attention_rescoring ctc_greedy_search ctc_prefix_beam_search attention"
 
 . utils/parse_options.sh || exit 1;
 
@@ -154,8 +155,6 @@ fi
 
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     # Test model, please specify the model you want to test by --checkpoint
-    cmvn_opts=
-    $cmvn && cmvn_opts="--cmvn data/${train_set}/global_cmvn"
     # TODO, Add model average here
     mkdir -p $dir/test
     if [ ${average_checkpoint} == true ]; then
@@ -168,13 +167,12 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
             --val_best
     fi
     # static dataloader is need for attention_rescoring decode
-    sed -i 's/dynamic/static/g' $dir/train.yaml
     # Specify decoding_chunk_size if it's a unified dynamic chunk trained model
     # -1 for full chunk
     decoding_chunk_size=
     ctc_weight=0.5
     for test in $recog_set; do
-    for mode in attention_rescoring ctc_greedy_search ctc_prefix_beam_search attention; do
+    for mode in ${decode_modes}; do
     {
         test_dir=$dir/${test}_${mode}
         mkdir -p $test_dir
@@ -189,10 +187,9 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
             --dict $dict \
             --result_file $test_dir/text_bpe \
             --ctc_weight $ctc_weight \
-            $cmvn_opts \
             ${decoding_chunk_size:+--decoding_chunk_size $decoding_chunk_size}
         tools/spm_decode --model=${bpemodel}.model --input_format=piece < $test_dir/text_bpe | sed -e "s/▁/ /g" > $test_dir/text
-        python2 tools/compute-wer.py --char=1 --v=1 \
+        python tools/compute-wer.py --char=1 --v=1 \
             data/$test/text $test_dir/text > $test_dir/wer
     } &
     done

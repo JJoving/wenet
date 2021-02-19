@@ -348,6 +348,7 @@ class ConformerEncoder(BaseEncoder):
         use_cnn_module: bool = True,
         cnn_module_kernel: int = 15,
         causal: bool = False,
+        cnn_module_norm: str = "batch_norm",
     ):
         """Construct ConformerEncoder
 
@@ -370,7 +371,8 @@ class ConformerEncoder(BaseEncoder):
                          linear_units, num_blocks, dropout_rate,
                          positional_dropout_rate, attention_dropout_rate,
                          input_layer, pos_enc_layer_type, normalize_before,
-                         concat_after, static_chunk_size, use_dynamic_chunk)
+                         concat_after, static_chunk_size, use_dynamic_chunk,
+                         global_cmvn)
         activation = get_activation(activation_type)
 
         # self-attention module definition
@@ -391,7 +393,7 @@ class ConformerEncoder(BaseEncoder):
         # convolution module definition
         convolution_layer = ConvolutionModule
         convolution_layer_args = (output_size, cnn_module_kernel, activation,
-                                  causal)
+                                  cnn_module_norm, causal)
 
         self.encoders = torch.nn.ModuleList([
             ConformerEncoderLayer(
