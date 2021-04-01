@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "torch/script.h"
@@ -23,7 +24,27 @@ using TorchModule = torch::jit::script::Module;
 
 struct DecodeOptions {
   int chunk_size = 16;
+  int num_left_chunks = -1;
   CtcPrefixBeamSearchOptions ctc_search_opts;
+};
+
+struct WordPiece {
+  std::string word;
+  int start = -1;
+  int end = -1;
+
+  WordPiece(std::string word, int start, int end)
+      : word(std::move(word)), start(start), end(end) {}
+};
+
+struct DecodeResult {
+  float score = -kFloatMax;
+  std::string sentence;
+  std::vector<WordPiece> word_pieces;
+
+  static bool CompareFunc(const DecodeResult& a, const DecodeResult& b) {
+    return a.score > b.score;
+  }
 };
 
 // Torch ASR decoder
@@ -39,12 +60,13 @@ class TorchAsrDecoder {
   int num_frames_in_current_chunk() const {
     return num_frames_in_current_chunk_;
   }
-  std::string result() const { return result_; }
+  const std::vector<DecodeResult>& result() const { return result_; }
 
  private:
   // Return true if we reach the end of the feature pipeline
   bool AdvanceDecoding();
   void AttentionRescoring();
+  void UpdateResult();
 
   std::shared_ptr<FeaturePipeline> feature_pipeline_;
   std::shared_ptr<TorchAsrModel> model_;
@@ -58,13 +80,13 @@ class TorchAsrDecoder {
   // transformer/conformer encoder layers output cache
   torch::jit::IValue elayers_output_cache_;
   torch::jit::IValue conformer_cnn_cache_;
-  torch::Tensor encoder_out_;
+  std::vector<torch::Tensor> encoder_outs_;
   int offset_ = 0;  // offset
 
   std::unique_ptr<CtcPrefixBeamSearch> ctc_prefix_beam_searcher_;
 
   int num_frames_in_current_chunk_;
-  std::string result_;
+  std::vector<DecodeResult> result_;
 
  public:
   DISALLOW_COPY_AND_ASSIGN(TorchAsrDecoder);

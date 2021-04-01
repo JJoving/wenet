@@ -4,7 +4,6 @@
 #ifndef DECODER_CTC_PREFIX_BEAM_SEARCH_H_
 #define DECODER_CTC_PREFIX_BEAM_SEARCH_H_
 
-#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -25,20 +24,28 @@ struct CtcPrefixBeamSearchOptions {
 };
 
 struct PrefixScore {
-  // blank endding score
-  float s = -std::numeric_limits<float>::max();
-  // none blank ending score
-  float ns = -std::numeric_limits<float>::max();
-  PrefixScore() {}
-  PrefixScore(float s, float ns) : s(s), ns(ns) {}
+  float s = -kFloatMax;               // blank endding score
+  float ns = -kFloatMax;              // none blank ending score
+  float v_s = -kFloatMax;             // viterbi blank endding score
+  float v_ns = -kFloatMax;            // viterbi none blank endding score
+  float cur_token_prob = -kFloatMax;  // prob of current token
+  std::vector<int> times_s;           // times of viterbi blank path
+  std::vector<int> times_ns;          // times of viterbi none blank path
+
+  PrefixScore() = default;
+  float score() const { return LogAdd(s, ns); }
+  float viterbi_score() const { return v_s > v_ns ? v_s : v_ns; }
+  const std::vector<int>& times() const {
+    return v_s > v_ns ? times_s : times_ns;
+  }
 };
 
 struct PrefixHash {
   size_t operator()(const std::vector<int>& prefix) const {
     size_t hash_code = 0;
     // here we use KB&DR hash code
-    for (size_t i = 0; i < prefix.size(); ++i) {
-      hash_code = prefix[i] + 31 * hash_code;
+    for (int id : prefix) {
+      hash_code = id + 31 * hash_code;
     }
     return hash_code;
   }
@@ -55,13 +62,20 @@ class CtcPrefixBeamSearch {
     return hypotheses_;
   }
   const std::vector<float>& likelihood() const { return likelihood_; }
+  const std::vector<float>& viterbi_likelihood() const {
+    return viterbi_likelihood_;
+  }
+  const std::vector<std::vector<int>>& times() const { return times_; }
 
  private:
+  int abs_time_step_;
   std::unordered_map<std::vector<int>, PrefixScore, PrefixHash> cur_hyps_;
 
   // Nbest list and corresponding likelihood_, in sorted order
   std::vector<std::vector<int>> hypotheses_;
   std::vector<float> likelihood_;
+  std::vector<float> viterbi_likelihood_;
+  std::vector<std::vector<int>> times_;
 
   const CtcPrefixBeamSearchOptions& opts_;
 

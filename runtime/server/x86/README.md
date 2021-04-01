@@ -2,7 +2,7 @@
 
 ## Build
 
-The build requires cmake 3.14 or above. For building, please first change to `wenet/runtime/x86` as your build directory, then type:
+The build requires cmake 3.14 or above. For building, please first change to `wenet/runtime/server/x86` as your build directory, then type:
 
 ``` sh
 mkdir build && cd build && cmake .. && cmake --build .
@@ -12,7 +12,8 @@ mkdir build && cd build && cmake .. && cmake --build .
 
 You can run the following on your trained model, or using our pretrained model. Click the following link to download the pretrained model.
 
-* [Chinese model trained on AIShell](http://mobvoi-speech-public.ufile.ucloud.cn/public/wenet/aishell/20210121_unified_transformer_server.tar.gz)
+* [Chinese model trained on AIShell](http://mobvoi-speech-public.ufile.ucloud.cn/public/wenet/aishell/20210221_unified_transformer_server.tar.gz)
+* [Model trained on AISHELL-2](http://mobvoi-speech-public.ufile.ucloud.cn/public/wenet/aishell2/20210327_unified_transformer_exp_server.tar.gz)
 * [TODO: add English model trained on Librispeech](link)
 
 ## Run offline ASR demo
@@ -37,6 +38,8 @@ After decoding, the average RTF of the waves will display on the console.
 
 We build a Websocket demo to show how WeNet U2 model works in a streaming fashion.
 
+### Server
+
 First, run the server by:
 
 ``` sh
@@ -50,7 +53,24 @@ model_dir=your_model_dir
     --dict_path $model_dir/words.txt 2>&1 | tee server.log
 ```
 
-Then, run the client by:
+### Web Client
+
+Then, run the web client to communicate with the `websocket_server_main`. There are
+two ways to run the web client. Open `web/templates/index.html` in the browser directly, or
+start up a web server by Flask as follows:
+
+``` sh
+pip install Flask
+python web/app.py
+```
+
+Input the `WebSocket URL`, it will request some permissions, and start to record.
+
+![Runtime web](../../../docs/images/runtime_web.png)
+
+### Client
+
+Also, you could run the client in the command line by:
 
 ```sh
 export GLOG_logtostderr=1
@@ -74,3 +94,22 @@ model, websocket server and websocket client enable streaming ASR.
 
 ![Runtime server demo](../../../docs/images/runtime_server.gif)
 
+## Run the demo in Docker
+
+When you encounter an issue trying to run the demo, we encourage you to run the demo in
+the Docker container. The image contains the latest release, a shell script and
+several waves to run the demo. Just run it as follows:
+
+``` sh
+docker run --rm -it mobvoiwenet/wenet:v0.1.0 bash
+```
+
+Or build the Dockerfile yourself, and run it by:
+
+``` sh
+DOCKER_BUILDKIT=1 docker build --no-cache -t wenet:latest .
+docker run --rm -it wenet bash
+cmake --build /home/wenet/runtime/server/x86/build
+```
+
+The pretrained model folder is located at `/home`, and the binary is located at `/home/wenet/runtime/server/x86/build`. Run it as previous mentioned.

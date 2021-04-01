@@ -14,8 +14,8 @@ TorchAsrDecoder::TorchAsrDecoder(
     std::shared_ptr<FeaturePipeline> feature_pipeline,
     std::shared_ptr<TorchAsrModel> model, const SymbolTable& symbol_table,
     const DecodeOptions& opts)
-    : feature_pipeline_(feature_pipeline),
-      model_(model),
+    : feature_pipeline_(std::move(feature_pipeline)),
+      model_(std::move(model)),
       symbol_table_(symbol_table),
       opts_(opts),
       ctc_prefix_beam_searcher_(new CtcPrefixBeamSearch(opts.ctc_search_opts)) {
@@ -23,12 +23,13 @@ TorchAsrDecoder::TorchAsrDecoder(
 
 void TorchAsrDecoder::Reset() {
   start_ = false;
-  result_ = "";
+  result_.clear();
   offset_ = 0;
   num_frames_in_current_chunk_ = 0;
   subsampling_cache_ = std::move(torch::jit::IValue());
   elayers_output_cache_ = std::move(torch::jit::IValue());
   conformer_cnn_cache_ = std::move(torch::jit::IValue());
+  encoder_outs_.clear();
   cached_feature_.clear();
   ctc_prefix_beam_searcher_->Reset();
   feature_pipeline_->Reset();
@@ -44,7 +45,8 @@ bool TorchAsrDecoder::Decode() {
     LOG(INFO) << "Rescoring cost latency: "
               << std::chrono::duration_cast<std::chrono::milliseconds>(end -
                                                                        start)
-                     .count() << "ms.";
+                     .count()
+              << "ms.";
     return true;
   }
   return false;
@@ -86,46 +88,40 @@ bool TorchAsrDecoder::AdvanceDecoding() {
                               .clone();
       feats[0][i] = std::move(row);
     }
-    int offset = cached_feature_.size();
     for (size_t i = 0; i < chunk_feats.size(); ++i) {
       torch::Tensor row =
           torch::from_blob(chunk_feats[i].data(), {feature_dim}, torch::kFloat)
               .clone();
-      feats[0][offset + i] = std::move(row);
+      feats[0][cached_feature_.size() + i] = std::move(row);
     }
 
     // 2. Encoder chunk forward
+    int requried_cache_size = opts_.chunk_size * opts_.num_left_chunks;
     torch::NoGradGuard no_grad;
-    std::vector<torch::jit::IValue> inputs = {
-        feats, subsampling_cache_, elayers_output_cache_, conformer_cnn_cache_};
+    std::vector<torch::jit::IValue> inputs = {feats,
+                                              offset_,
+                                              requried_cache_size,
+                                              subsampling_cache_,
+                                              elayers_output_cache_,
+                                              conformer_cnn_cache_};
     auto outputs = model_->torch_model()
                        ->get_method("forward_encoder_chunk")(inputs)
                        .toTuple()
                        ->elements();
     CHECK_EQ(outputs.size(), 4);
-    // The encoder_out_ is from time 0 to current chunk, and offset_ is the
-    // offset of current chunk, so to get output of current chunk, just slice
-    // as the following code
-    encoder_out_ = outputs[0].toTensor();
+    torch::Tensor chunk_out = outputs[0].toTensor();
     subsampling_cache_ = outputs[1];
     elayers_output_cache_ = outputs[2];
     conformer_cnn_cache_ = outputs[3];
-    torch::Tensor chunk_out =
-        encoder_out_.slice(1, offset_, encoder_out_.size(1));
-    offset_ = encoder_out_.size(1);
+    offset_ += chunk_out.size(1);
     // The first dimension is a fake dimension, it's 1 for one utterance,
     // so just ignore it here.
     torch::Tensor ctc_log_probs = model_->torch_model()
                                       ->run_method("ctc_activation", chunk_out)
                                       .toTensor()[0];
+    encoder_outs_.push_back(std::move(chunk_out));
     ctc_prefix_beam_searcher_->Search(ctc_log_probs);
-    auto hypotheses = ctc_prefix_beam_searcher_->hypotheses();
-    const std::vector<int>& best_hyp = hypotheses[0];
-    result_ = "";
-    for (size_t i = 0; i < best_hyp.size(); ++i) {
-      result_ += symbol_table_.Find(best_hyp[i]);
-    }
-    VLOG(1) << "Partial CTC result " << result_;
+    UpdateResult();
 
     // 3. cache feature for next chunk
     if (!finish) {
@@ -146,9 +142,37 @@ bool TorchAsrDecoder::AdvanceDecoding() {
   return finish;
 }
 
-static bool CompareFunc(const std::pair<int, float>& a,
-                        const std::pair<int, float>& b) {
-  return a.second > b.second;
+void TorchAsrDecoder::UpdateResult() {
+  const auto& hypotheses = ctc_prefix_beam_searcher_->hypotheses();
+  const auto& likelihood = ctc_prefix_beam_searcher_->likelihood();
+  const auto& times = ctc_prefix_beam_searcher_->times();
+  int ms_per_step = model_->subsampling_rate() *
+          feature_pipeline_->config().frame_shift *
+          1000 / feature_pipeline_->config().sample_rate;
+  result_.clear();
+
+  CHECK_EQ(hypotheses.size(), likelihood.size());
+  CHECK_EQ(hypotheses.size(), times.size());
+  for (size_t i = 0; i < hypotheses.size(); i++) {
+    std::vector<int> hypothesis = hypotheses[i];
+    std::vector<int> time_stamp = times[i];
+    CHECK_EQ(hypothesis.size(), time_stamp.size());
+
+    DecodeResult path;
+    path.score = likelihood[i];
+    int start = 0;
+    for (size_t j = 0; j < hypothesis.size(); j++) {
+      std::string word = symbol_table_.Find(hypothesis[j]);
+      path.sentence += word;
+
+      WordPiece word_piece(word, start, time_stamp[j] * ms_per_step);
+      path.word_pieces.emplace_back(word_piece);
+      start = word_piece.end;
+    }
+    path.sentence = ProcessBlank(path.sentence);
+    result_.emplace_back(path);
+  }
+  VLOG(1) << "Partial CTC result " << result_[0].sentence;
 }
 
 void TorchAsrDecoder::AttentionRescoring() {
@@ -175,17 +199,16 @@ void TorchAsrDecoder::AttentionRescoring() {
     }
   }
 
-  // Step 2: forward attention decoder by hyps and corresponding encoder_out_
+  // Step 2: forward attention decoder by hyps and corresponding encoder_outs_
+  torch::Tensor encoder_out = torch::cat(encoder_outs_, 1);
   torch::Tensor probs = model_->torch_model()
                             ->run_method("forward_attention_decoder",
-                                         hyps_tensor, hyps_length, encoder_out_)
+                                         hyps_tensor, hyps_length, encoder_out)
                             .toTensor();
   CHECK_EQ(probs.size(0), num_hyps);
   CHECK_EQ(probs.size(1), max_hyps_len);
 
   // Step 3: Compute rescoring score
-  // (id, score) pair for later sort
-  std::vector<std::pair<int, float>> weighted_scores(num_hyps);
   for (size_t i = 0; i < num_hyps; ++i) {
     const std::vector<int>& hyp = hypotheses[i];
     float score = 0.0f;
@@ -194,23 +217,9 @@ void TorchAsrDecoder::AttentionRescoring() {
     }
     score += probs[i][hyp.size()][eos].item<float>();
     // TODO(Binbin Zhang): Combine CTC and attention decoder score
-    weighted_scores[i].first = i;
-    weighted_scores[i].second = score;
+    result_[i].score = score;
   }
-
-  std::sort(weighted_scores.begin(), weighted_scores.end(), CompareFunc);
-  for (size_t i = 0; i < weighted_scores.size(); ++i) {
-    std::string result;
-    int best_k = weighted_scores[i].first;
-    for (size_t j = 0; j < hypotheses[best_k].size(); ++j) {
-      result += symbol_table_.Find(hypotheses[best_k][j]);
-    }
-    VLOG(1) << "ctc index " << best_k << " result " << result << " score "
-            << weighted_scores[i].second;
-    if (0 == i) {
-      result_ = result;
-    }
-  }
+  std::sort(result_.begin(), result_.end(), DecodeResult::CompareFunc);
 }
 
 }  // namespace wenet

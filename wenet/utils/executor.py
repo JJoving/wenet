@@ -2,9 +2,11 @@
 # Author: binbinzhang@mobvoi.com (Binbin Zhang)
 
 import logging
+from contextlib import nullcontext
+# if your python version < 3.7 use the below one
+# from contextlib import suppress as nullcontext
 import torch
 from torch.nn.utils import clip_grad_norm_
-
 
 class Executor:
     def __init__(self):
@@ -19,6 +21,7 @@ class Executor:
         log_interval = args.get('log_interval', 10)
         rank = args.get('rank', 0)
         accum_grad = args.get('accum_grad', 1)
+        is_distributed = args.get('is_distributed', True)
         logging.info('using accumulate grad, new batch size is {} times'
                      'larger than before'.format(accum_grad))
         num_seen_utts = 0
@@ -32,10 +35,24 @@ class Executor:
             num_utts = target_lengths.size(0)
             if num_utts == 0:
                 continue
-            loss, loss_att, loss_ctc = model(feats, feats_lengths, target,
-                                             target_lengths)
-            loss = loss / accum_grad
-            loss.backward()
+            context = None
+            # Disable gradient synchronizations across DDP processes.
+            # Within this context, gradients will be accumulated on module
+            # variables, which will later be synchronized.
+            if is_distributed and batch_idx % accum_grad != 0 :
+                context = model.no_sync
+            # Used for single gpu training and DDP gradient synchronization
+            # processes.
+            else:
+                context = nullcontext
+            with context():
+                loss, loss_att, loss_ctc = model(feats,
+                                                 feats_lengths,
+                                                 target,
+                                                 target_lengths)
+                loss = loss / accum_grad
+                loss.backward()
+
             num_seen_utts += num_utts
             if batch_idx % accum_grad == 0:
                 if rank == 0 and writer is not None:
@@ -49,18 +66,23 @@ class Executor:
 
             if batch_idx % log_interval == 0:
                 lr = optimizer.param_groups[0]['lr']
-                logging.debug('TRAIN Batch {}/{} loss {:.6f} loss_att {:.6f} '
-                              'loss_ctc {:.6f} lr {:.8f} rank {}'.format(
-                                  batch_idx, num_total_batch,
-                                  loss.item() * accum_grad, loss_att.item(),
-                                  loss_ctc.item(), lr, rank))
+                log_str = 'TRAIN Batch {}/{} loss {:.6f} '.format(
+                    batch_idx, num_total_batch,
+                    loss.item() * accum_grad)
+                if loss_att is not None:
+                    log_str += 'loss_att {:.6f} '.format(loss_att.item())
+                if loss_ctc is not None:
+                    log_str += 'loss_ctc {:.6f} '.format(loss_ctc.item())
+                log_str += 'lr {:.8f} rank {}'.format(lr, rank)
+                logging.debug(log_str)
 
     def cv(self, model, data_loader, device, args):
         ''' Cross validation on
         '''
         model.eval()
         log_interval = args.get('log_interval', 10)
-        num_seen_utts = 0
+        # in order to avoid division by 0
+        num_seen_utts = 1
         total_loss = 0.0
         num_total_batch = len(data_loader)
         with torch.no_grad():
@@ -79,10 +101,14 @@ class Executor:
                     num_seen_utts += num_utts
                     total_loss += loss.item() * num_utts
                 if batch_idx % log_interval == 0:
-                    logging.debug('CV Batch {}/{} loss {:.6f} loss_att {:.6f} '
-                                  'loss_ctc {:.6f} history loss {:.6f}'.format(
-                                      batch_idx, num_total_batch, loss.item(),
-                                      loss_att.item(), loss_ctc.item(),
-                                      total_loss / num_seen_utts))
+                    log_str = 'CV Batch {}/{} loss {:.6f} '.format(
+                        batch_idx, num_total_batch, loss.item())
+                    if loss_att is not None:
+                        log_str += 'loss_att {:.6f} '.format(loss_att.item())
+                    if loss_ctc is not None:
+                        log_str += 'loss_ctc {:.6f} '.format(loss_ctc.item())
+                    log_str += 'history loss {:.6f}'.format(
+                        total_loss / num_seen_utts)
+                    logging.debug(log_str)
 
         return total_loss, num_seen_utts
