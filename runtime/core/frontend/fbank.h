@@ -15,14 +15,14 @@
 #ifndef FRONTEND_FBANK_H_
 #define FRONTEND_FBANK_H_
 
+#include <cstring>
 #include <limits>
 #include <random>
 #include <utility>
 #include <vector>
 
-#include "glog/logging.h"
-
 #include "frontend/fft.h"
+#include "utils/log.h"
 
 namespace wenet {
 
